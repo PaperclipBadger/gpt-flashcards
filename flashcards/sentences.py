@@ -37,9 +37,11 @@ I am [a woman].
 
 
 
-2. A nawet najbardziej zagorzała feministka musi przyznać, że [kobiecie] jest znacznie łatwiej zaspokoić mężczyznę niż vice versa.
+2. A nawet najbardziej zagorzała feministka musi przyznać,
+że [kobiecie] jest znacznie łatwiej zaspokoić mężczyznę niż vice versa.
 
-And even the most ardent feminist has to admit that it is much easier for [a woman] to satisfy a man than vice versa.
+And even the most ardent feminist has to admit that it is much easier
+for [a woman] to satisfy a man than vice versa.
 
 
 

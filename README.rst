@@ -22,7 +22,7 @@ Instructions
 
 Download Per Eriksson's `Polish-English deck`_. Then,
 
-..code:: bash
+.. code:: bash
 
     export OPENAI_API_KEY=<your-openai-api-key>
     pip install poetry
@@ -32,7 +32,7 @@ Download Per Eriksson's `Polish-English deck`_. Then,
 You can use `dump.py`_ to dump the contents of an Anki package as CSV files,
 which is useful for debugging (it saves you making a round trip to Anki desktop).
 
-..code:: bash
+.. code:: bash
 
     poetry run python dump.py GPT-Polish.apkg
 

@@ -11,6 +11,12 @@ If you'd like to use this for target languages other than Polish,
 you'll probably need to start by changing the examples in GPT system prompt
 in `sentences.py`_
 
+Here's an example sentence for the Polish word "angielski":
+    
+   Chciałbym zamówić książkę do nauki języka [angielskiego].
+   
+   `Generated audio`_
+
 Instructions
 ------------
 
@@ -31,5 +37,6 @@ which is useful for debugging (it saves you making a round trip to Anki desktop)
     poetry run python dump.py GPT-Polish.apkg
 
 .. _sentences.py: ./flashcards/sentences.py
+.. _Generated audio: ./media/angielski0.mp3
 .. _Polish-English Deck: https://ankiweb.net/shared/info/3199057698
 .. _dump.py: ./dump.py

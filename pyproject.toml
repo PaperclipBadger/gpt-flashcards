@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "flashcards"
+version = "0.1.0"
+description = "Program to add example sentences and tts to flashcards using AI."
+authors = ["Blaine Rogers <blaine.w.rogers@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+genanki = "^0.13.1"
+openai = "^1.3.3"
+pyyaml = "^6.0.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

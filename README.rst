@@ -17,6 +17,9 @@ Here's an example sentence for the Polish word "angielski":
    
    `Generated audio`_
 
+It cost me about 5 USD in OpenAI credits to debug this program and generate examples for
+the ~1000 cards tagged d1 in the `Polish-English deck`_.
+
 Instructions
 ------------
 

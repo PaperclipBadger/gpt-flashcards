@@ -29,13 +29,19 @@ Surround the target word with square brackets.
 Each sentence should be followed by its English translation.
 Here is an example of the expected output format:
 
+
+
 1. Jestem [kobieciątkiem].
 
 I am [a woman].
 
+
+
 2. A nawet najbardziej zagorzała feministka musi przyznać, że [kobiecie] jest znacznie łatwiej zaspokoić mężczyznę niż vice versa.
 
 And even the most ardent feminist has to admit that it is much easier for [a woman] to satisfy a man than vice versa.
+
+
 
 3. Najwyższe spożycie u bezrobotnych [kobiet] jest nowym zjawiskiem.
 

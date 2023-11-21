@@ -11,7 +11,36 @@ import yaml
 
 
 DATABASE = pathlib.Path("sentences.db")
-CONFIG = pathlib.Path("config.yaml")
+
+
+def unwrap(text: str) -> str:
+    """Converts newlines to spaces and double newlines to newlines."""
+    text = text.strip()
+    return "\n".join(line.replace("\n", " ") for line in text.split("\n\n"))
+
+
+SYSTEM_PROMPT = unwrap("""
+Congratulations on being hired as a language tutor assistant.
+Your first job is to write example sentences showing the different ways a word can be used.
+A user will give you a word in their target language, like "kobieta",
+and you should respond with three example sentences
+showing different grammatical forms of the word.
+Surround the target word with square brackets.
+Each sentence should be followed by its English translation.
+Here is an example of the expected output format:
+
+1. Jestem [kobieciątkiem].
+
+I am [a woman].
+
+2. A nawet najbardziej zagorzała feministka musi przyznać, że [kobiecie] jest znacznie łatwiej zaspokoić mężczyznę niż vice versa.
+
+And even the most ardent feminist has to admit that it is much easier for [a woman] to satisfy a man than vice versa.
+
+3. Najwyższe spożycie u bezrobotnych [kobiet] jest nowym zjawiskiem.
+
+That the highest consumption is by unemployed [women] is a new phenomenon.
+""")
 
 
 class RateLimiter:
@@ -127,18 +156,12 @@ class Cloze:
 
 
 client = None
-config = None
 
 
 def init_client():
-    global config, client
-
-    if config is None:
-        with open(CONFIG) as f:
-            config = yaml.safe_load(f)
-    
+    global client
     if client is None:
-        client = openai.AsyncOpenAI(api_key=config["openai"]["api_key"])
+        client = openai.AsyncOpenAI()
 
 
 completion_rate_limiter = RateLimiter(499)
@@ -154,7 +177,7 @@ async def query_gpt(word: str) -> list[str]:
         completion = await client.chat.completions.create(
             model="gpt-4-1106-preview",
             messages=[
-                dict(role="system", content=config["openai"]["system_prompt"]),
+                dict(role="system", content=SYSTEM_PROMPT),
                 dict(role="user", content=word),
             ],
         )

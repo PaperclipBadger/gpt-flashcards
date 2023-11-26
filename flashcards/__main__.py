@@ -1,192 +1,201 @@
-from typing import TypedDict
+from typing import TypedDict, Required
 
 import argparse
 import asyncio
+import dataclasses
 import pathlib
 import re
+import logging
+import sys
+import tempfile
 
-import genanki
+import anki
 import tqdm
 
-from flashcards.anki import read_package
+from flashcards.anki import edit_collection, yamlify
 from flashcards.sentences import example_sentences, tts
 
 
-CSS = """
-.card {
-    font-family: serif;
-    font-size: 25px;
-    text-align: center;
-    color: black;
-    background-color: white;
-}
-"""
-
-class Template(TypedDict):
-    name: str
-    qfmt: str
-    afmt: str
+logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+logger.addHandler(handler)
+del handler
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("anki_package", type=pathlib.Path)
-parser.add_argument("output", type=pathlib.Path)
+parser.add_argument(
+    "package",
+    type=pathlib.Path,
+    help="Path to source anki deck.",
+)
+parser.add_argument("out", type=pathlib.Path)
+parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-vv", "--very-verbose", action="store_true")
+parser.add_argument("--dry-run", action="store_true")
+parser.add_argument(
+    "--deck-name",
+    help="Name of the deck to add sentences and readings to."
+    " If left blank, defaults to the first deck in the package not named Default,"
+    " unless there is only one deck in the package in which case we use that deck.",
+)
+parser.add_argument(
+    "--model",
+    default="Basic",
+    help="Name of the note type to add sentences and readings to.",
+)
+parser.add_argument(
+    "--word-field",
+    default="Front",
+    help="Name of the field to use as a source for vocabulary words.",
+)
+parser.add_argument(
+    "--word-regex",
+    default=r"\A\s*(?P<word>\w+)\s*\Z",
+    help="Regular expression (python syntax) for extracting the word from the field."
+    " Should have a group named `word`, e.g. " r"\A\s*(?P<word>\w+)\s*\Z",
+)
+parser.add_argument(
+    "--include-tags",
+    nargs="+",
+    help="filter in notes with these tags.",
+)
+parser.add_argument(
+    "--exclude-tags",
+    nargs="+",
+    default=None,
+    help="Filter out notes with these tags."
+)
+parser.add_argument(
+    "-n", "--n-sentences",
+    type=int,
+    default=1,
+    help="Number of sentences to generate per card."
+)
 args = parser.parse_args()
 
-collection = read_package(args.anki_package)
+if args.very_verbose:
+    logger.setLevel(logging.DEBUG)
+elif args.verbose:
+    logger.setLevel(logging.INFO)
+else:
+    logger.setLevel(logging.WARNING)
 
-
-def sentence_template(i: int) -> Template:
-    return Template(
-        name='Example Sentence %(i)d' % dict(i=i),
-        qfmt='{{#Sentence%(i)d}}{{Voice%(i)d}} {{Sentence%(i)d}}{{/Sentence%(i)d}}' % dict(i=i),
-        afmt='{{FrontSide}}\n<hr id=answer>\n{{Word}}—{{Meaning}}\n<br>\n{{Translation%(i)d}}' % dict(i=i),
+with edit_collection(args.package) as col:
+    logger.info(f"{len(col.models.all())} models: " + ", ".join(m['name'] for m in col.models.all()))
+    logger.info(
+        f"{len(col.decks.all())} decks: "
+        + ", ".join(d['name'] for d in col.decks.all())
     )
 
+    def predicate(model) -> bool:
+        return (
+            model['name'].casefold() == args.model.casefold()
+            and args.word_field in {fld['name'] for fld in model['flds']}
+        )
 
-examples_model = genanki.Model(
-    1205523417,
-    'Word with examples',
-    fields=[
-        dict(name='Word'),
-        dict(name='Meaning'),
-        dict(name='Comments'),
-        dict(name='Sentence0'),
-        dict(name='Voice0'),
-        dict(name='Cloze0'),
-        dict(name='Conjugation0'),
-        dict(name='Translation0'),
-        dict(name='Sentence1'),
-        dict(name='Voice1'),
-        dict(name='Cloze1'),
-        dict(name='Conjugation1'),
-        dict(name='Translation1'),
-        dict(name='Sentence2'),
-        dict(name='Voice2'),
-        dict(name='Cloze2'),
-        dict(name='Conjugation2'),
-        dict(name='Translation2'),
+    try:
+        source_model = next(iter(filter(predicate, col.models.all())))
+    except StopIteration:
+        logger.fatal("Could not find model %s in package.", args.model)
+        sys.exit(1)
 
-    ],
-    templates=[
-        Template(name='Meaning', qfmt='{{Word}}', afmt='{{FrontSide}}<hr id=answer>{{Meaning}}<br>{{Comments}}'),
-        sentence_template(0),
-        sentence_template(1),
-        sentence_template(2),
-    ],
-    css=CSS,
-)
+    if args.deck_name is None:
+        def predicate(deck) -> bool:
+            return deck['name'].casefold() != "default"
 
-basic_model = genanki.Model(
-    1938227838,
-    'Phrase',
-    fields=[
-        dict(name='Original'),
-        dict(name='Voice'),
-        dict(name='Translation'),
-        dict(name='Comments'),
-    ],
-    templates=[
-        Template(name='Meaning', qfmt='{{Voice}} {{Original}}', afmt='{{FrontSide}}<hr id=answer>{{Translation}}<br>{{Comments}}'),
-    ],
-    css=CSS,
-)
+        try:
+            source_deck = next(iter(filter(predicate, col.decks.all())))
+        except StopIteration:
+            source_deck = next(iter(col.decks.all()))
+    else:
+        def predicate(deck) -> bool:
+            return deck['name'].casefold() == args.deck_name.casefold()
 
+        try:
+            source_deck = next(iter(filter(predicate, col.decks.all())))
+        except StopIteration:
+            logger.fatal("Could not find deck %s in package.", args.deck_name)
+            sys.exit(1)
 
-deck = genanki.Deck(1557327995, args.output.stem)
-deck.add_model(examples_model)
-deck.add_model(basic_model)
-
-media_path = pathlib.Path("media")
-media_path.mkdir(exist_ok=True)
-media = []
-
-async def make_sentence_note(word, source_note):
-    translation = source_note.fields["Translation"]
-    comments = source_note.fields["Comments"]
-
-    clozes = await example_sentences(word)
-
-    if not clozes:
-        return
-
-    audio_paths = [media_path / f"{word.replace("/", "_")}{i}.mp3" for i in range(3)]
-    audio_tasks = []
-    for (cloze, _), audio_path in zip(clozes, audio_paths):
-        audio_tasks.append(tts(cloze.sentence, audio_path))
-    await asyncio.gather(*audio_tasks)
-
-    fields = [word, translation, comments]
-
-    for (cloze, translation), audio_path in zip(clozes, audio_paths):
-        media.append(str(audio_path))
-        fields.extend((cloze.sentence, f"[sound:{audio_path.name}]", cloze.cloze, ", ".join(cloze.deletions), translation.sentence))
-    
-    while len(fields) < len(examples_model.fields):
-        fields.append("")
-
-    note = genanki.Note(model=examples_model, fields=fields, tags=list(source_note.tags))
-    deck.add_note(note)
-
-
-async def make_phrase_note(source_note):
-    original = source_note.fields["Polish original"]
-    translation = source_note.fields["Translation"]
-    comments = source_note.fields["Comments"]
-
-    audio_path = media_path / f"{original.replace("/", "_")}.mp3"
-    await tts(original, audio_path)
-    media.append(str(audio_path))
-
-    note = genanki.Note(
-        model=basic_model,
-        fields=[original, f"[sound:{audio_path.name}]", translation, comments],
-        tags=list(source_note.tags),
-    )
-    deck.add_note(note)
-
-
-async def make_notes():
-    tasks = []
-
-    source_notes = (note for note in collection.notes if "d1" in note.tags)
-    sentence_whitelist = {"noun", "particle", "verb", "adjective", "adverb", "conjunction", "preposition", "interjection", "pronoun", "numeral"}
-    phrase_whitelist = {"expression", "sentence", "phrase"}
-
-    for source_note in source_notes:
-        if (
-            sentence_whitelist & source_note.tags
-            and (match := re.match(r"(<\w+>)?([\w/]+|\w+(,\s+\w+)*?)(</\w+>)?(\s+\(.*?\))?", source_note.fields["Polish original"]))
-            and all(map(lambda word: len(word) - 1, (words := match.group(2).split(", "))))
-        ):
-            for word in words:
-                tasks.append(make_sentence_note(word, source_note))
-        elif phrase_whitelist & source_note.tags:
-            tasks.append(make_phrase_note(source_note))
+    def add_field_idempotent(name: str) -> None:
+        for fld in source_model["flds"]:
+            if fld["name"] == name:
+                break
         else:
-            note = genanki.Note(
-                model=basic_model,
-                fields=[
-                    source_note.fields["Polish original"],
-                    "",
-                    source_note.fields["Translation"],
-                    source_note.fields["Comments"],
-                ],
-                tags=list(source_note.tags),
-            )
-            deck.add_note(note)
+            col.models.addField(source_model, dict(name=name))
 
-    bar = tqdm.tqdm(total=len(tasks))
+    if not args.dry_run:
+        for i in range(args.n_sentences):
+            add_field_idempotent(f"Sentence{i}")
+            add_field_idempotent(f"SentenceTranslation{i}")
+            add_field_idempotent(f"Voice{i}")
 
-    async with asyncio.TaskGroup() as tg:
-        for task in tasks:
-            task = tg.create_task(task)
-            task.add_done_callback(lambda _: bar.update())
+    def update_note(source_note, sentences):
+        for i, (sentence, translation, voice) in sentences:
+            logger.info("adding sentence {sentence!r} {translation!r} to {word!r}")
+            source_note[f"Sentence{i}"] = sentence
+            source_note[f"SentenceTranslation{i}"] = translation
+            source_note[f"Voice{i}"] = f"[sound:{voice.name}]"
+            col.media.add_file(voice)
 
+        col.update_note(source_note)
+    
+    media_path = pathlib.Path("media")
 
-asyncio.run(make_notes())
+    async def make_sentence_note(word, source_note):
+        clozes = await example_sentences(word)
+        if not clozes:
+            return
 
+        audio_paths = [media_path / f"{word.replace("/", "_")}{i}.mp3" for i in range(args.n_sentences)]
+        audio_tasks = []
+        for (cloze, _), audio_path in zip(clozes, audio_paths):
+            audio_tasks.append(tts(cloze.sentence, audio_path))
+        await asyncio.gather(*audio_tasks)
 
-package = genanki.Package(deck)
-package.media_files = media
-package.write_to_file(args.output)
+        sentences = [
+            (cloze.sentence, translation, audio_path)
+            for (cloze, translation), audio_path in zip(clozes, audio_paths)
+        ]
+        update_note(source_note, sentences)
+
+    word_re = re.compile(args.word_regex)
+    html_re = re.compile(r"<[^>]+?>")
+
+    async def make_notes():
+        tasks = []
+
+        whitelist = set(args.include_tags) if args.include_tags else set()
+        blacklist = set(args.exclude_tags) if args.exclude_tags else set()
+
+        for nid in col.find_notes(""):
+            source_note = col.get_note(nid)
+            tags = set(source_note.tags)
+            if (
+                source_note.mid == source_model["id"]
+                and (not args.include_tags or whitelist & tags)
+                and not blacklist & tags
+            ):
+                value = source_note[args.word_field]
+                value = html_re.sub("", value)
+                if (match := word_re.match(value)):
+                    word = match.group("word")
+
+                    if args.dry_run:
+                        logger.debug(f"would add sentences to {word!r}")
+                    else:
+                        tasks.append(make_sentence_note(word, source_note))
+                else:
+                    logger.error(f"source field value {value!r} did not match regex {word_re!r}")
+                    logger.error(yamlify(source_note))
+                    sys.exit(1)
+
+        bar = tqdm.tqdm(total=len(tasks))
+
+        async with asyncio.TaskGroup() as tg:
+            for task in tasks:
+                task = tg.create_task(task)
+                task.add_done_callback(lambda _: bar.update())
+
+    asyncio.run(make_notes())

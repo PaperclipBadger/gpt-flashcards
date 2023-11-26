@@ -223,7 +223,7 @@ async def tts(sentence: str, path: pathlib.Path) -> None:
         return
 
     # drop any html formatting from sentence
-    sentence = re.sub(r"</?\w+>", "", sentence)
+    sentence = re.sub(r"<[^>]+?>", "", sentence)
 
     if not sentence:
         raise Exception("lolwut")

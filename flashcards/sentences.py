@@ -97,7 +97,6 @@ def uncache_sentences(word: str) -> None:
         
         word_id, = row
         conn.execute("DELETE FROM sentences WHERE word = ?", (word_id,))
-        print(f"deleted all sentences for word {word_id}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,7 +146,7 @@ def init_client():
         client = openai.AsyncOpenAI()
 
 
-completion_rate_limiter = RateLimiter(499)
+completion_rate_limiter = RateLimiter(490)
 
 
 async def query_gpt(system_prompt: str, word: str) -> list[str]:
@@ -163,34 +162,49 @@ async def query_gpt(system_prompt: str, word: str) -> list[str]:
                 dict(role="system", content=system_prompt),
                 dict(role="user", content=word),
             ],
+            stop="\n\n",
         )
 
     response = completion.choices[0].message.content.strip()
 
-    sentences = []
+    if (match := re.match(r"\A\s*(?P<sentence>.+?)\n+(?P<translation>.+?)\s*\Z", response)):
+        sentence = match.group("sentence") + "\n" + match.group("translation")
+    else:
+        raise ValueError(f"Could not parse GPT response {response!r}")
 
-    for candidate in response.split("\n\n"):
-        if (match := re.match(r"\A(.*?\n.*?)\Z", candidate)):
-            sentences.append(match.group(1))
+    encache_sentences(word, [sentence])
 
-    encache_sentences(word, sentences)
-
-    return sentences
+    return [sentence]
 
 
 async def example_sentences(prompt: str, word: str) -> list[tuple[Cloze, Cloze]]:
-    sentences = await query_gpt(prompt, word)
+    errors = []
+    for _ in range(3):
+        try:
+            sentences = await query_gpt(prompt, word)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
 
-    examples = []
-    for pair in sentences:
-        sentence, translation = pair.split("\n")
-        examples.append((Cloze.from_str(sentence), Cloze.from_str(translation)))
+        examples = []
+        try:
+            for pair in sentences:
+                sentence, translation = map(Cloze.from_str, pair.split("\n"))
+                if (not sentence.deletions) or (not translation.deletions):
+                    uncache_sentences(word)
+                    raise ValueError(f"no deletions in {sentence.sentence!r} or {translation.sentence!r}")
+                examples.append((sentence, translation))
+        except ValueError as e:
+            errors.append(str(e))
+            continue
 
-    return examples
+        return examples
+    else:
+        raise ValueError(f"repeatedly queried GPT for {word!r} but got no good responses:" + ", ".join(errors))
 
 
 count = iter(itertools.count())
-tts_rate_limiter = RateLimiter(49)
+tts_rate_limiter = RateLimiter(40)
 
 
 async def tts(sentence: str, path: pathlib.Path) -> None:

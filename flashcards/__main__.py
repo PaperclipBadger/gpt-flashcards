@@ -215,7 +215,11 @@ with open(args.prompt_file) as f:
     prompt = f.read()
 
 async def make_sentence_note(word, meaning, source_note):
-    (cloze, translation), *_ = await example_sentences(prompt, f"{word} ({meaning})")
+    try:
+        (cloze, translation), *_ = await example_sentences(prompt, f"{word} ({meaning})")
+    except ValueError as e:
+        logger.error(str(e))
+        return
 
     safe_word = strip_ruby(strip_html(word)).translate({"/": "_", ":": "_"})
     audio_path = media_path / f"{safe_word}.mp3"
@@ -232,7 +236,7 @@ async def make_notes():
     whitelist = set(args.include_tags) if args.include_tags else set()
     blacklist = set(args.exclude_tags)
 
-    for source_note in collection.notes[:1]:
+    for source_note in collection.notes:
         tags = set(source_note.tags)
         if (
             source_note.model.id == source_model.id

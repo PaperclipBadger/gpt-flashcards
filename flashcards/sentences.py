@@ -13,44 +13,6 @@ import yaml
 DATABASE = pathlib.Path("sentences.db")
 
 
-def unwrap(text: str) -> str:
-    """Converts newlines to spaces and double newlines to newlines."""
-    text = text.strip()
-    return "\n".join(line.replace("\n", " ") for line in text.split("\n\n"))
-
-
-SYSTEM_PROMPT = unwrap("""
-Congratulations on being hired as a language tutor assistant.
-Your first job is to write example sentences showing the different ways a word can be used.
-A user will give you a word in their target language, like "kobieta",
-and you should respond with three example sentences
-showing different grammatical forms of the word.
-Surround the target word with square brackets.
-Each sentence should be followed by its English translation.
-Here is an example of the expected output format:
-
-
-
-1. Jestem [kobieciątkiem].
-
-I am [a woman].
-
-
-
-2. A nawet najbardziej zagorzała feministka musi przyznać,
-że [kobiecie] jest znacznie łatwiej zaspokoić mężczyznę niż vice versa.
-
-And even the most ardent feminist has to admit that it is much easier
-for [a woman] to satisfy a man than vice versa.
-
-
-
-3. Najwyższe spożycie u bezrobotnych [kobiet] jest nowym zjawiskiem.
-
-That the highest consumption is by unemployed [women] is a new phenomenon.
-""")
-
-
 class RateLimiter:
     def __init__(self, rpm: int) -> None:
         self.sem = asyncio.Semaphore(rpm)
@@ -125,6 +87,19 @@ def decache_sentences(word: str) -> list[str]:
         return [row[0] for row in cursor.fetchall() if row[0]]
 
 
+def uncache_sentences(word: str) -> None:
+    if not DATABASE.exists():
+        return
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.execute("SELECT id FROM words WHERE word = ?", (word,))
+        if not (row := cursor.fetchone()):
+            return
+        
+        word_id, = row
+        conn.execute("DELETE FROM sentences WHERE word = ?", (word_id,))
+        print(f"deleted all sentences for word {word_id}")
+
+
 @dataclasses.dataclass(frozen=True)
 class Cloze:
     context: list[str]
@@ -137,7 +112,7 @@ class Cloze:
 
         i = 0
 
-        for match in re.finditer(r"\[(.*?)\]", s):
+        for match in re.finditer(r"\{(.*?)\}", s):
             context.append(s[i:match.start()])
             deletions.append(match.group(1))
             i = match.end()
@@ -148,7 +123,7 @@ class Cloze:
 
     def fill(self, *values: str) -> str:
         if not values:
-            values = ("[...]",)
+            values = ("...",)
 
         wrapped = ["<b>" + value + "</b>" for value in values]
         parts = itertools.chain.from_iterable(zip(self.context, itertools.cycle(wrapped)))
@@ -175,7 +150,7 @@ def init_client():
 completion_rate_limiter = RateLimiter(499)
 
 
-async def query_gpt(word: str) -> list[str]:
+async def query_gpt(system_prompt: str, word: str) -> list[str]:
     if (cached_sentences := decache_sentences(word)):
         return cached_sentences
     
@@ -185,7 +160,7 @@ async def query_gpt(word: str) -> list[str]:
         completion = await client.chat.completions.create(
             model="gpt-4-1106-preview",
             messages=[
-                dict(role="system", content=SYSTEM_PROMPT),
+                dict(role="system", content=system_prompt),
                 dict(role="user", content=word),
             ],
         )
@@ -195,7 +170,7 @@ async def query_gpt(word: str) -> list[str]:
     sentences = []
 
     for candidate in response.split("\n\n"):
-        if (match := re.match(r"^\d+\. (.*?\n.*?)$", candidate)):
+        if (match := re.match(r"\A(.*?\n.*?)\Z", candidate)):
             sentences.append(match.group(1))
 
     encache_sentences(word, sentences)
@@ -203,8 +178,8 @@ async def query_gpt(word: str) -> list[str]:
     return sentences
 
 
-async def example_sentences(word: str) -> list[tuple[Cloze, Cloze]]:
-    sentences = await query_gpt(word)
+async def example_sentences(prompt: str, word: str) -> list[tuple[Cloze, Cloze]]:
+    sentences = await query_gpt(prompt, word)
 
     examples = []
     for pair in sentences:

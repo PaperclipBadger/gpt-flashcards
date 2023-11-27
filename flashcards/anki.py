@@ -7,9 +7,8 @@ import contextlib
 import dataclasses
 import functools
 import itertools
-import json
 import pathlib
-import sqlite3
+import shutil
 import typing
 import tempfile
 import zipfile
@@ -33,6 +32,19 @@ class Template:
     # https://docs.ankiweb.net/importing/packaged-decks.html#note-to-deck-authors 
     id: int = None
 
+    def to_anki2(self) -> dict:
+        return dict(
+            name=self.name,
+            qfmt=self.qfmt,
+            afmt=self.afmt,
+            bqfmt=self.bqfmt,
+            bafmt=self.bafmt,
+            bfont=self.bfont,
+            bsize=self.bsize,
+            did=self.deck.id if self.deck else None,
+            id=self.id,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class Field:
@@ -44,6 +56,16 @@ class Field:
     # field ids were introduced in Anki 2.1.67
     # https://docs.ankiweb.net/importing/packaged-decks.html#note-to-deck-authors 
     id: int = None
+
+    def to_anki2(self) -> dict:
+        return dict(
+            name=self.name,
+            font=self.font,
+            size=self.size,
+            rtl=self.rtl,
+            sticky=self.sticky,
+            id=self.id,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,7 +105,8 @@ class Card:
 class Deck:
     id: int
     name: str
-    cards: list[Card]
+    description: str = ""
+    cards: list[Card] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,16 +116,18 @@ class Collection:
     decks: list[Deck]
 
 
-
 @contextlib.contextmanager
 def read_collection(path: pathlib.Path):
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = pathlib.Path(tmpdir)
 
         with zipfile.ZipFile(path) as zf:
-            zf.extract("collection.anki2", path=tmpdir)
+            zf.extractall(path=tmpdir)
 
-        yield anki.collection.Collection(tmpdir / "collection.anki2")
+        anki2 = tmpdir / "collection.anki2"
+        anki21 = tmpdir / "collection.anki21"
+        colpath = (anki21 if anki21.exists() else anki2)
+        yield anki.collection.Collection(colpath)
 
 
 @contextlib.contextmanager
@@ -114,11 +139,12 @@ def edit_collection(path: pathlib.Path):
             infos = zf.infolist()
             zf.extractall(path=tmpdir)
 
-        colpath = tmpdir / "collection.anki21"
-        if not colpath.exists():
-            colpath = tmpdir / "colleciton.anki2"
+        anki2 = tmpdir / "collection.anki2"
+        anki21 = tmpdir / "collection.anki21"
+        if anki21.exists():
+            shutil.move(anki21, anki2)
 
-        col = anki.collection.Collection(colpath)
+        col = anki.collection.Collection(anki2)
         yield col
         col.close()
 
@@ -130,12 +156,13 @@ def edit_collection(path: pathlib.Path):
 
 
 def read_package(path: pathlib.Path) -> Collection:
-    with read_collection() as col:
+    with read_collection(path) as col:
         decks = {}
         for deck in col.decks.all():
             name = deck["name"]
             deck_id = deck["id"]
-            decks[deck_id] = Deck(id=deck_id, name=name, cards=[])
+            description = deck["desc"]
+            decks[deck_id] = Deck(id=deck_id, name=name, description=description)
     
         models = {}
         for model in col.models.all():
@@ -162,7 +189,7 @@ def read_package(path: pathlib.Path) -> Collection:
                         qfmt=t["qfmt"],
                         afmt=t["afmt"],
                         bqfmt=t["bqfmt"],
-                        bafmt=t["aqfmt"],
+                        bafmt=t["bafmt"],
                         bfont=t["bfont"],
                         bsize=t["bsize"],
                         deck=decks[t["did"]] if t["did"] else None,
@@ -174,8 +201,8 @@ def read_package(path: pathlib.Path) -> Collection:
             )
 
         notes = {}
-        for nid in col.find_notes("*"):
-            note = col.get_card(nid)
+        for nid in col.find_notes(""):
+            note = col.get_note(nid)
 
             model = models[note.mid]
             fields = note.fields
@@ -183,7 +210,7 @@ def read_package(path: pathlib.Path) -> Collection:
             note = Note(id=int(note.id), guid=note.guid, model=model, field_values=fields, tags=tags)
             notes[note.id] = note
 
-        for cid in col.find_cards("*"):
+        for cid in col.find_cards(""):
             card = col.get_card(cid)
             deck = decks[card.did]
             note = notes[card.nid]
@@ -216,6 +243,7 @@ def yamlify(dataclass, indent: int = 0, bullet: bool = False) -> str:
                 elif typing.get_origin(item_type) is list:
                     raise NotImplementedError("doubly nested lists not supported")
                 else:
+                    print(item_type, elem)
                     lines.append(yamlify(elem, indent=indent + 1, bullet=True))
         else:
             lines.append(f"{prefix}{field.name}:")

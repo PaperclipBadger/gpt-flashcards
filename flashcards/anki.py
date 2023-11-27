@@ -22,6 +22,16 @@ class Template:
     name: str
     qfmt: str
     afmt: str
+    # format pair for when card is displayed in browser
+    bqfmt: str = ""
+    bafmt: str = ""
+    bfont: str = ""
+    bsize: int = 0
+    # the deck to add this card to by default
+    deck: "Deck" = None
+    # template ids were introduced in Anki 2.1.67
+    # https://docs.ankiweb.net/importing/packaged-decks.html#note-to-deck-authors 
+    id: int = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -31,6 +41,9 @@ class Field:
     size: int = 20
     rtl: bool = False  # right-to-left
     sticky: bool = False  # sticky fields retain the value that was last added when adding new notes
+    # field ids were introduced in Anki 2.1.67
+    # https://docs.ankiweb.net/importing/packaged-decks.html#note-to-deck-authors 
+    id: int = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,6 +131,12 @@ def edit_collection(path: pathlib.Path):
 
 def read_package(path: pathlib.Path) -> Collection:
     with read_collection() as col:
+        decks = {}
+        for deck in col.decks.all():
+            name = deck["name"]
+            deck_id = deck["id"]
+            decks[deck_id] = Deck(id=deck_id, name=name, cards=[])
+    
         models = {}
         for model in col.models.all():
             models[model["id"]] = Model(
@@ -130,6 +149,7 @@ def read_package(path: pathlib.Path) -> Collection:
                         size=fld["size"],
                         rtl=fld["rtl"],
                         sticky=fld["sticky"],
+                        id=fld["id"],
                     )
                     for fld in model["flds"]
                 ],
@@ -137,7 +157,17 @@ def read_package(path: pathlib.Path) -> Collection:
                 latex_pre=model["latexPre"],
                 latex_post=model["latexPost"],
                 templates=[
-                    Template(name=t["name"], qfmt=t["qfmt"], afmt=t["afmt"])
+                    Template(
+                        name=t["name"],
+                        qfmt=t["qfmt"],
+                        afmt=t["afmt"],
+                        bqfmt=t["bqfmt"],
+                        bafmt=t["aqfmt"],
+                        bfont=t["bfont"],
+                        bsize=t["bsize"],
+                        deck=decks[t["did"]] if t["did"] else None,
+                        id=t["did"],
+                    )
                     for t in model["tmpls"]
                 ],
                 sort_field=model["sortf"],
@@ -153,12 +183,6 @@ def read_package(path: pathlib.Path) -> Collection:
             note = Note(id=int(note.id), guid=note.guid, model=model, field_values=fields, tags=tags)
             notes[note.id] = note
 
-        decks = {}
-        for deck in col.decks.all():
-            name = deck["name"]
-            deck_id = deck["id"]
-            decks[deck_id] = Deck(id=deck_id, name=name, cards=[])
-    
         for cid in col.find_cards("*"):
             card = col.get_card(cid)
             deck = decks[card.did]

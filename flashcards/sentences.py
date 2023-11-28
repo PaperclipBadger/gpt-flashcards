@@ -294,7 +294,7 @@ async def tts(sentence: str, path: pathlib.Path) -> None:
 
     init_client()
 
-    voice = ["alloy", "echo", "fable", "onyx", "nova"][next(count) % 5]
+    voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"][next(count) % 6]
 
     async with get_rate_limiter("tts-1"):
         response = await client.audio.speech.create(

@@ -2,15 +2,43 @@ import asyncio
 import dataclasses
 import functools
 import itertools
+import logging
 import pathlib
 import re
 import sqlite3
 
 import openai
-import yaml
+
+from flashcards.sanitize import strip_html, strip_ruby, strip_parenthetical
+
+
+logger = logging.getLogger(__name__)
 
 
 DATABASE = pathlib.Path("sentences.db")
+cloze_re = re.compile(r"\{([^\}]*)\}")
+comma_re = re.compile(r", |; |、")
+
+# https://platform.openai.com/account/limits
+RATE_LIMITS = {
+    "gpt-3.5-turbo": 3500,
+    "gpt-3.5-turbo-0301": 3500,
+    "gpt-3.5-turbo-0613": 3500,
+    "gpt-3.5-turbo-1106": 3500,
+    "gpt-3.5-turbo-16k": 3500,
+    "gpt-3.5-turbo-16k-0613": 3500,
+    "gpt-3.5-turbo-instruct": 3000,
+    "gpt-3.5-turbo-instruct-0914": 3000,
+    "gpt-4": 500,
+    "gpt-4-0314": 500,
+    "gpt-4-0613": 500,
+    "gpt-4-1106-preview": 500,
+    "gpt-4-vision-preview": 80,
+    "tts-1": 50,
+    "tts-1-1106": 50,
+    "tts-1-hd": 3,
+    "tts-1-hd-1106": 3,
+}
 
 
 class RateLimiter:
@@ -25,13 +53,23 @@ class RateLimiter:
 
     async def __aenter__(self):
         await self.sem.acquire()
-        task = asyncio.create_task(asyncio.sleep(60))
+        task = asyncio.create_task(asyncio.sleep(61))
         self.sleepers.add(task)
         assert len(self.sleepers) <= self.rpm
         task.add_done_callback(self.sleeper_callback)
     
     async def __aexit__(self, exc_type, exc, tb):
         pass
+
+
+rate_limiters = {}
+
+def get_rate_limiter(model: str):
+    try:
+        return rate_limiters[model]
+    except KeyError:
+        rate_limiters[model] = RateLimiter(RATE_LIMITS[model])
+        return rate_limiters[model]
 
 
 def init_cache() -> None:
@@ -99,6 +137,7 @@ def uncache_sentences(word: str) -> None:
         conn.execute("DELETE FROM sentences WHERE word = ?", (word_id,))
 
 
+
 @dataclasses.dataclass(frozen=True)
 class Cloze:
     context: list[str]
@@ -111,7 +150,7 @@ class Cloze:
 
         i = 0
 
-        for match in re.finditer(r"\{(.*?)\}", s):
+        for match in cloze_re.finditer(s):
             context.append(s[i:match.start()])
             deletions.append(match.group(1))
             i = match.end()
@@ -146,21 +185,24 @@ def init_client():
         client = openai.AsyncOpenAI()
 
 
-completion_rate_limiter = RateLimiter(490)
-
-
-async def query_gpt(system_prompt: str, word: str) -> list[str]:
+async def query_gpt(
+    system_prompt: str,
+    word: str,
+    meaning: str = None,
+    model: str = "gtp-4-1106-preview",
+) -> list[str]:
     if (cached_sentences := decache_sentences(word)):
         return cached_sentences
     
     init_client()
     
-    async with completion_rate_limiter:
+    async with get_rate_limiter(model):
+        user_prompt = f"{word} ({meaning})" if meaning else word
         completion = await client.chat.completions.create(
-            model="gpt-4-1106-preview",
+            model=model,
             messages=[
                 dict(role="system", content=system_prompt),
-                dict(role="user", content=word),
+                dict(role="user", content=user_prompt),
             ],
             stop="\n\n",
         )
@@ -168,35 +210,69 @@ async def query_gpt(system_prompt: str, word: str) -> list[str]:
     response = completion.choices[0].message.content.strip()
 
     if (match := re.match(r"\A\s*(?P<sentence>.+?)\n+(?P<translation>.+?)\s*\Z", response)):
-        sentence = match.group("sentence") + "\n" + match.group("translation")
+        sentence = match.group("sentence")
+        translation = match.group("translation")
     else:
         raise ValueError(f"Could not parse GPT response {response!r}")
 
-    encache_sentences(word, [sentence])
+    # sometimes GPT forgets to wrap the target word in {}
+    # often we can recover by searching for the literal string
+    def encloze(sentence: str, words: str) -> str:
+        clozed = False
 
-    return [sentence]
+        alternatives = comma_re.split(words)
+        for a in alternatives:
+            try:
+                i = sentence.casefold().index(a.casefold())
+            except ValueError as e:
+                continue
+            else:
+                parts = [sentence[:i], "{", a, "}", sentence[i + len(a):]]
+                sentence = "".join(parts)
+                clozed = True
+
+        if not clozed:
+            raise ValueError(f"could not cloze any of {alternatives!r} in {sentence!r}")
+        else:
+            return sentence
+
+    if not cloze_re.search(sentence):
+        plain_word = strip_parenthetical(strip_html(strip_ruby(word)))
+        sentence = encloze(sentence, plain_word)
+        
+    if not cloze_re.search(translation):
+        plain_meaning = strip_parenthetical(strip_html(strip_ruby(meaning)))
+        try:
+            translation = encloze(translation, plain_meaning)
+        except ValueError as e:
+            logger.error(f"(non-fatal) {e}")
+    
+    sentences = [f"{sentence}\n{translation}"]
+
+    encache_sentences(word, sentences)
+
+    return sentences
 
 
-async def example_sentences(prompt: str, word: str) -> list[tuple[Cloze, Cloze]]:
+async def example_sentences(
+    prompt: str,
+    word: str,
+    meaning: str = None,
+    model: str = "gpt-4-1106-preview",
+) -> list[tuple[Cloze, Cloze]]:
     errors = []
     for _ in range(3):
         try:
-            sentences = await query_gpt(prompt, word)
+            sentences = await query_gpt(prompt, word, meaning)
         except ValueError as e:
+            logger.error(str(e))
             errors.append(str(e))
             continue
 
         examples = []
-        try:
-            for pair in sentences:
-                sentence, translation = map(Cloze.from_str, pair.split("\n"))
-                if (not sentence.deletions) or (not translation.deletions):
-                    uncache_sentences(word)
-                    raise ValueError(f"no deletions in {sentence.sentence!r} or {translation.sentence!r}")
-                examples.append((sentence, translation))
-        except ValueError as e:
-            errors.append(str(e))
-            continue
+        for pair in sentences:
+            sentence, translation = map(Cloze.from_str, pair.split("\n"))
+            examples.append((sentence, translation))
 
         return examples
     else:
@@ -204,7 +280,6 @@ async def example_sentences(prompt: str, word: str) -> list[tuple[Cloze, Cloze]]
 
 
 count = iter(itertools.count())
-tts_rate_limiter = RateLimiter(40)
 
 
 async def tts(sentence: str, path: pathlib.Path) -> None:
@@ -212,7 +287,7 @@ async def tts(sentence: str, path: pathlib.Path) -> None:
         return
 
     # drop any html formatting from sentence
-    sentence = re.sub(r"<[^>]+?>", "", sentence)
+    sentence = strip_html(strip_ruby(sentence))
 
     if not sentence:
         raise Exception("lolwut")
@@ -221,7 +296,7 @@ async def tts(sentence: str, path: pathlib.Path) -> None:
 
     voice = ["alloy", "echo", "fable", "onyx", "nova"][next(count) % 5]
 
-    async with tts_rate_limiter:
+    async with get_rate_limiter("tts-1"):
         response = await client.audio.speech.create(
             # tts-1-hd is twice as expensive for no noticeable improvement (in Polish).
             model="tts-1",

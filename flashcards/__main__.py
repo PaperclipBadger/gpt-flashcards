@@ -11,22 +11,11 @@ import genanki
 import tqdm
 
 from flashcards.anki import read_package
+from flashcards.sanitize import strip_html, strip_ruby, to_filename
 from flashcards.sentences import example_sentences, tts
 
 
-html_re = re.compile(r"<[^>]+?>")
-
-def strip_html(s: str) -> str:
-    return html_re.sub("", s)
-
-
-ruby_re = re.compile(r"\[[^\]]+?\]")
-
-def strip_ruby(s: str) -> str:
-    return ruby_re.sub("", s)
-
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("flashcards")
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
 logger.addHandler(handler)
@@ -107,6 +96,11 @@ parser.add_argument(
     nargs="+",
     default=[],
     help="Filter out notes with these tags."
+)
+parser.add_argument(
+    "--gpt-version",
+    default="gpt-4-1106-preview",
+    help="Which version of GPT to use (see https://openai.com/pricing)",
 )
 
 args = parser.parse_args()
@@ -216,12 +210,14 @@ with open(args.prompt_file) as f:
 
 async def make_sentence_note(word, meaning, source_note):
     try:
-        (cloze, translation), *_ = await example_sentences(prompt, f"{word} ({meaning})")
+        (cloze, translation), *_ = await example_sentences(
+            prompt, word, meaning, model=args.gpt_version,
+        )
     except ValueError as e:
         logger.error(str(e))
         return
 
-    safe_word = strip_ruby(strip_html(word)).translate({"/": "_", ":": "_"})
+    safe_word = to_filename(strip_ruby(strip_html(word)))
     audio_path = media_path / f"{safe_word}.mp3"
     await tts(cloze.sentence, audio_path)
 
@@ -264,8 +260,9 @@ async def make_notes():
             task = tg.create_task(task)
             task.add_done_callback(lambda _: bar.update())
 
-asyncio.run(make_notes())
-
-package = genanki.Package([deck])
-package.media_files = media_files
-package.write_to_file(args.out)
+try:
+    asyncio.run(make_notes())
+finally:
+    package = genanki.Package([deck])
+    package.media_files = media_files
+    package.write_to_file(args.out)
